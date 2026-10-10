@@ -16,16 +16,28 @@ const TIMER_KEY = "zhelezo-timer-end";
 
 const categories = ["Грудь", "Спина", "Ноги", "Плечи", "Руки", "Кор", "Другое"];
 const categoryLetters = { Грудь: "Г", Спина: "С", Ноги: "Н", Плечи: "П", Руки: "Р", Кор: "К", Другое: "•" };
+const weekDays = [
+  { key: "mon", label: "Понедельник", short: "Пн", jsDay: 1 },
+  { key: "tue", label: "Вторник", short: "Вт", jsDay: 2 },
+  { key: "wed", label: "Среда", short: "Ср", jsDay: 3 },
+  { key: "thu", label: "Четверг", short: "Чт", jsDay: 4 },
+  { key: "fri", label: "Пятница", short: "Пт", jsDay: 5 },
+  { key: "sat", label: "Суббота", short: "Сб", jsDay: 6 },
+  { key: "sun", label: "Воскресенье", short: "Вс", jsDay: 0 }
+];
 
 const state = {
   route: "home",
   exercises: [],
   workouts: [],
+  programs: [],
   activeWorkout: readJson(ACTIVE_KEY),
   settings: { restSeconds: 90, ...readJson(SETTINGS_KEY) },
   selectedProgressId: "",
   timerEnd: Number(localStorage.getItem(TIMER_KEY)) || 0,
-  expandedWorkout: null
+  expandedWorkout: null,
+  programDraft: null,
+  exercisePickerContext: { type: "workout" }
 };
 
 const app = document.querySelector("#app");
@@ -78,16 +90,27 @@ function bindEvents() {
 async function refreshData() {
   state.exercises = (await getAll("exercises")).sort((a, b) => a.name.localeCompare(b.name, "ru"));
   state.workouts = (await getAll("workouts")).sort((a, b) => new Date(b.date) - new Date(a.date));
+  state.programs = (await getAll("programs")).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  if (state.settings.activeProgramId && !state.programs.some((program) => program.id === state.settings.activeProgramId)) {
+    state.settings.activeProgramId = state.programs[0]?.id || "";
+    saveSettings();
+  }
+  if (!state.settings.activeProgramId && state.programs.length) {
+    state.settings.activeProgramId = state.programs[0].id;
+    saveSettings();
+  }
   if (!state.selectedProgressId) state.selectedProgressId = mostUsedExerciseId() || state.exercises[0]?.id || "";
 }
 
 function render() {
-  nav.hidden = state.route === "workout";
-  app.classList.toggle("workout-view", state.route === "workout");
+  nav.hidden = state.route === "workout" || state.route === "program-edit";
+  app.classList.toggle("workout-view", state.route === "workout" || state.route === "program-edit");
   nav.querySelectorAll("[data-route]").forEach((button) => button.classList.toggle("active", button.dataset.route === state.route));
 
   const renderers = {
     home: renderHome,
+    programs: renderPrograms,
+    "program-edit": renderProgramEditor,
     history: renderHistory,
     progress: renderProgress,
     settings: renderSettings,
@@ -100,29 +123,56 @@ function render() {
 function renderHome() {
   const stats = weeklyStats(state.workouts);
   const lastWorkout = state.workouts[0];
+  const activeProgram = getActiveProgram();
+  const today = activeProgram?.days.find((day) => day.key === todayKey());
+  const weekday = weekDays.find((day) => day.key === today?.key);
+  const heroTitle = state.activeWorkout
+    ? "Продолжаем\nработу."
+    : today
+      ? `${weekday.label}.\nПлан готов.`
+      : activeProgram
+        ? "Сегодня\nвосстановление."
+        : "Собери свою\nпрограмму.";
   const subtitle = state.activeWorkout
     ? "Тренировка уже идёт. Продолжим с того же места."
-    : "Без аккаунтов, облаков и лишней суеты. Только ты и железо.";
+    : today
+      ? `${today.exercises.length} ${plural(today.exercises.length, "упражнение", "упражнения", "упражнений")} из программы «${escapeHtml(activeProgram.name)}» уже ждут.`
+      : activeProgram
+        ? "По плану сегодня отдыхаем. Можно выбрать любой другой тренировочный день."
+        : "Один раз добавь дни и упражнения — дальше останется вводить только вес и повторения.";
+  const primaryAction = state.activeWorkout ? "start-workout" : today ? "start-today" : activeProgram ? "open-programs" : "create-program";
+  const primaryLabel = state.activeWorkout ? "Продолжить тренировку" : today ? "Начать по плану" : activeProgram ? "Выбрать тренировку" : "Создать программу";
 
   return `
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">${greeting().toUpperCase()}</p>
-        <h1>${state.activeWorkout ? "Продолжаем\nработу." : "Время поднять\nтяжёлое."}</h1>
+        <h1>${heroTitle}</h1>
         <p>${subtitle}</p>
-        <button class="button button-primary" data-action="start-workout">
-          ${state.activeWorkout ? "Продолжить тренировку" : "Начать тренировку"}
-        </button>
+        <div class="hero-actions">
+          <button class="button button-primary" data-action="${primaryAction}">${primaryLabel}</button>
+          ${!state.activeWorkout ? '<button class="button button-ghost" data-action="start-workout">Свободная тренировка</button>' : ""}
+        </div>
       </div>
     </section>
 
     <section class="section">
-      <div class="section-head"><div><h2>Эта неделя</h2><p>С понедельника по сегодня</p></div></div>
+      <div class="section-head"><div><h2>Эта неделя</h2><p>Коротко и по делу</p></div></div>
       <div class="stats-grid">
         <article class="stat-card accent"><strong>${stats.count}</strong><span>тренировки</span></article>
-        <article class="stat-card"><strong>${formatCompact(stats.volume)}</strong><span>общий объём, кг</span></article>
-        <article class="stat-card"><strong>${stats.sets}</strong><span>рабочих подходов</span></article>
+        <article class="stat-card"><strong>${activeProgram?.days.length || 0}</strong><span>дней в программе</span></article>
+        <article class="stat-card"><strong>${lastWorkout ? shortDate(lastWorkout.date) : "—"}</strong><span>последний зал</span></article>
       </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div><h2>${today ? "Сегодня по плану" : "Твоя программа"}</h2><p>${activeProgram ? escapeHtml(activeProgram.name) : "Настроим расписание под тебя"}</p></div>
+        ${activeProgram ? '<button class="text-button" data-route="programs">Открыть</button>' : ""}
+      </div>
+      ${today ? scheduleDayCard(activeProgram, today, true) : activeProgram
+        ? emptyState("◌", "День отдыха", "Сегодня в программе нет тренировки. Отдыхай или выбери другой день вручную.", "Выбрать день", "open-programs")
+        : emptyState("▦", "Программы ещё нет", "Выбери дни недели, упражнения и количество подходов один раз.", "Создать программу", "create-program")}
     </section>
 
     <section class="section">
@@ -132,6 +182,115 @@ function renderHome() {
       </div>
       ${lastWorkout ? workoutCard(lastWorkout, false) : emptyState("◎", "Пока пусто", "Проведи первую тренировку — результаты сохранятся прямо на этом устройстве.", "Начать", "start-workout")}
     </section>`;
+}
+
+function renderPrograms() {
+  const activeProgram = getActiveProgram();
+  return `
+    <header class="page-head page-head-row">
+      <div><p class="eyebrow">РАСПИСАНИЕ</p><h1>Программы</h1><p class="muted">Настрой один раз — тренируйся без лишних нажатий.</p></div>
+      <button class="button button-primary compact-button" data-action="create-program">+ Создать</button>
+    </header>
+    ${state.programs.length
+      ? state.programs.map((program) => programCard(program, program.id === activeProgram?.id)).join("")
+      : emptyState("▦", "Создай первую программу", "Выбери тренировочные дни, добавь упражнения и укажи количество подходов.", "Создать программу", "create-program")}`;
+}
+
+function programCard(program, isActive) {
+  const days = sortedProgramDays(program.days);
+  const exerciseCount = days.reduce((sum, day) => sum + day.exercises.length, 0);
+  return `
+    <article class="program-card ${isActive ? "active-program" : ""}">
+      <div class="program-card-head">
+        <div>
+          ${isActive ? '<p class="eyebrow">АКТИВНАЯ ПРОГРАММА</p>' : '<p class="eyebrow muted-eyebrow">ПРОГРАММА</p>'}
+          <h2>${escapeHtml(program.name)}</h2>
+          <p>${days.length} ${plural(days.length, "день", "дня", "дней")} · ${exerciseCount} ${plural(exerciseCount, "упражнение", "упражнения", "упражнений")}</p>
+        </div>
+        <button class="icon-button" data-action="edit-program" data-program-id="${program.id}" aria-label="Редактировать программу">✎</button>
+      </div>
+      <div class="program-week-strip">
+        ${weekDays.map((weekday) => `<span class="${days.some((day) => day.key === weekday.key) ? "scheduled" : ""}">${weekday.short}</span>`).join("")}
+      </div>
+      ${isActive ? `<div class="program-days">${days.map((day) => scheduleDayCard(program, day)).join("")}</div>` : ""}
+      <div class="program-actions">
+        ${isActive ? '<span class="active-badge">✓ Используется сейчас</span>' : `<button class="button button-secondary" data-action="activate-program" data-program-id="${program.id}">Сделать активной</button>`}
+        <button class="text-button danger-text" data-action="delete-program" data-program-id="${program.id}">Удалить</button>
+      </div>
+    </article>`;
+}
+
+function scheduleDayCard(program, day, compact = false) {
+  const weekday = weekDays.find((item) => item.key === day.key);
+  const previous = latestProgramDayWorkout(program.id, day.key);
+  return `
+    <article class="schedule-card ${compact ? "schedule-card-featured" : ""}">
+      <div class="schedule-card-head">
+        <div class="schedule-day"><span>${weekday.short}</span><div><h3>${weekday.label}</h3><p>${previous ? `Последний раз: ${friendlyDate(previous.date)}` : "Ещё не выполнялась"}</p></div></div>
+        <button class="button button-primary compact-button" data-action="start-program-day" data-program-id="${program.id}" data-day-key="${day.key}">Начать</button>
+      </div>
+      <div class="plan-exercise-list">
+        ${day.exercises.map((exercise) => {
+          const previousExercise = previous?.exercises.find((item) => item.exerciseId === exercise.exerciseId);
+          const previousResult = previousExercise?.sets.length
+            ? previousExercise.sets.map((set) => `${formatNumber(Number(set.weight))}×${Number(set.reps) || 0}`).join(" · ")
+            : "нет прошлого результата";
+          return `<div class="plan-preview-row"><div><strong>${escapeHtml(exercise.name)}</strong><small>${escapeHtml(previousResult)}</small></div><span>${exercise.sets} подх.</span></div>`;
+        }).join("")}
+      </div>
+    </article>`;
+}
+
+function renderProgramEditor() {
+  const draft = state.programDraft;
+  if (!draft) {
+    state.route = "programs";
+    return renderPrograms();
+  }
+  const days = sortedProgramDays(draft.days);
+  return `
+    <div class="workout-top">
+      <button class="icon-button" data-action="cancel-program-edit" aria-label="Назад">‹</button>
+      <div class="timer-label"><small>${draft.isNew ? "НОВАЯ ПРОГРАММА" : "РЕДАКТИРОВАНИЕ"}</small><strong>Конструктор</strong></div>
+      <button class="text-button" data-action="save-program">Сохранить</button>
+    </div>
+    <header class="page-head program-editor-head">
+      <p class="eyebrow">НАЗВАНИЕ</p>
+      <input class="program-name-input" data-field="program-name" maxlength="48" value="${escapeHtml(draft.name)}" placeholder="Например, Push / Pull / Legs" aria-label="Название программы" />
+    </header>
+    <section class="section">
+      <div class="section-head"><div><h2>Дни тренировок</h2><p>Выбери, когда обычно ходишь в зал</p></div></div>
+      <div class="weekday-picker">
+        ${weekDays.map((weekday) => `<button class="weekday-button ${days.some((day) => day.key === weekday.key) ? "selected" : ""}" data-action="toggle-program-day" data-day-key="${weekday.key}"><strong>${weekday.short}</strong><small>${weekday.label.slice(0, 3)}</small></button>`).join("")}
+      </div>
+    </section>
+    <section class="section">
+      <div class="section-head"><div><h2>План по дням</h2><p>Добавь упражнения и количество подходов</p></div></div>
+      ${days.length ? days.map(programDayEditor).join("") : emptyState("＋", "Выбери хотя бы один день", "После выбора здесь появится карточка для упражнений.", "", "")}
+    </section>
+    <div class="workout-actions">
+      <button class="button button-primary" data-action="save-program">Сохранить программу</button>
+    </div>`;
+}
+
+function programDayEditor(day) {
+  const weekday = weekDays.find((item) => item.key === day.key);
+  return `
+    <article class="day-editor-card">
+      <div class="day-editor-head"><div><span>${weekday.short}</span><div><h3>${weekday.label}</h3><p>${day.exercises.length} ${plural(day.exercises.length, "упражнение", "упражнения", "упражнений")}</p></div></div><button class="mini-button" data-action="add-program-exercise" data-day-key="${day.key}">+ Упражнение</button></div>
+      ${day.exercises.length ? `<div class="planned-exercises">${day.exercises.map((exercise, index) => `
+        <div class="planned-exercise-row">
+          <span class="drag-index">${index + 1}</span>
+          <div class="planned-exercise-name"><strong>${escapeHtml(exercise.name)}</strong><small>рабочих подходов</small></div>
+          <div class="set-stepper">
+            <button data-action="program-set-minus" data-day-key="${day.key}" data-plan-exercise-id="${exercise.id}" aria-label="Уменьшить подходы">−</button>
+            <strong>${exercise.sets}</strong>
+            <button data-action="program-set-plus" data-day-key="${day.key}" data-plan-exercise-id="${exercise.id}" aria-label="Увеличить подходы">+</button>
+          </div>
+          <button class="set-remove" data-action="remove-program-exercise" data-day-key="${day.key}" data-plan-exercise-id="${exercise.id}" aria-label="Удалить упражнение">×</button>
+        </div>`).join("")}</div>` : '<div class="day-empty">В этот день пока нет упражнений.</div>'}
+      <button class="button button-secondary full-width day-add-button" data-action="add-program-exercise" data-day-key="${day.key}">+ Добавить упражнение</button>
+    </article>`;
 }
 
 function renderWorkout() {
@@ -150,7 +309,7 @@ function renderWorkout() {
       <button class="text-button" data-action="cancel-workout">Отмена</button>
     </div>
     <div class="section-head">
-      <div><h2>${workout.editingId ? "Правим запись" : "Рабочие подходы"}</h2><p>${doneSets} из ${totalSets} отмечено</p></div>
+      <div><h2>${workout.editingId ? "Правим запись" : escapeHtml(workout.title || "Рабочие подходы")}</h2><p>${workout.programName ? `${escapeHtml(workout.programName)} · ` : ""}${doneSets} из ${totalSets} отмечено</p></div>
     </div>
     <div id="active-exercises">
       ${workout.exercises.length ? workout.exercises.map(activeExerciseCard).join("") : emptyState("＋", "Добавь первое упражнение", "Выбери движение из списка или создай своё.", "Добавить упражнение", "open-exercises")}
@@ -168,12 +327,15 @@ function renderWorkout() {
 
 function activeExerciseCard(exercise, exerciseIndex) {
   const category = state.exercises.find((item) => item.id === exercise.exerciseId)?.category || "Другое";
+  const previousResult = exercise.previousSets?.length
+    ? exercise.previousSets.map((set) => `${formatNumber(Number(set.weight))}×${Number(set.reps) || 0}`).join(" · ")
+    : "";
   return `
     <article class="exercise-card" data-entry-id="${exercise.id}">
       <div class="exercise-card-head">
         <div class="exercise-name-wrap">
           <span class="exercise-symbol">${categoryLetters[category] || "•"}</span>
-          <div><h3>${escapeHtml(exercise.name)}</h3><small>${escapeHtml(category)}</small></div>
+          <div><h3>${escapeHtml(exercise.name)}</h3><small>${escapeHtml(category)}</small>${previousResult ? `<small class="previous-result">Прошлый раз: ${escapeHtml(previousResult)}</small>` : ""}</div>
         </div>
         <button class="icon-button" data-action="remove-exercise" data-entry-id="${exercise.id}" aria-label="Удалить упражнение">×</button>
       </div>
@@ -305,7 +467,7 @@ function renderSettings() {
     <section class="section">
       <button class="button button-danger full-width" data-action="wipe-data">Удалить все мои данные</button>
     </section>
-    <p class="muted" style="text-align:center;font-size:10px;margin-top:24px">ЖЕЛЕЗО · версия 1.0 · работает офлайн</p>`;
+    <p class="muted" style="text-align:center;font-size:10px;margin-top:24px">ЖЕЛЕЗО · версия 1.1 · работает офлайн</p>`;
 }
 
 async function handleClick(event) {
@@ -317,16 +479,33 @@ async function handleClick(event) {
   }
   const target = event.target.closest("[data-action]");
   if (!target) return;
-  const { action, entryId, setId, workoutId, exerciseId } = target.dataset;
+  const { action, entryId, setId, workoutId, exerciseId, programId, dayKey, planExerciseId } = target.dataset;
 
   if (action === "go-home") { state.route = "home"; render(); }
   if (action === "start-workout") startWorkout();
+  if (action === "start-today") {
+    const program = getActiveProgram();
+    if (program) startProgramWorkout(program.id, todayKey());
+  }
+  if (action === "open-programs") { state.route = "programs"; render(); }
+  if (action === "create-program") createProgramDraft();
+  if (action === "edit-program") editProgram(programId);
+  if (action === "cancel-program-edit") { state.programDraft = null; state.route = "programs"; render(); }
+  if (action === "toggle-program-day") toggleProgramDay(dayKey);
+  if (action === "add-program-exercise") openExerciseDialog({ type: "program", dayKey });
+  if (action === "program-set-minus") adjustProgramSets(dayKey, planExerciseId, -1);
+  if (action === "program-set-plus") adjustProgramSets(dayKey, planExerciseId, 1);
+  if (action === "remove-program-exercise") removeProgramExercise(dayKey, planExerciseId);
+  if (action === "save-program") await saveProgram();
+  if (action === "activate-program") await activateProgram(programId);
+  if (action === "delete-program") await deleteProgram(programId);
+  if (action === "start-program-day") startProgramWorkout(programId, dayKey);
   if (action === "leave-workout") { persistActive(); state.route = "home"; render(); }
-  if (action === "open-exercises") openExerciseDialog();
+  if (action === "open-exercises") openExerciseDialog({ type: "workout" });
   if (action === "close-exercise-dialog") exerciseDialog.close();
   if (action === "open-new-exercise") { exerciseDialog.close(); newExerciseDialog.showModal(); }
   if (action === "close-new-exercise") newExerciseDialog.close();
-  if (action === "select-exercise") addExerciseToWorkout(exerciseId);
+  if (action === "select-exercise") selectExerciseFromPicker(exerciseId);
   if (action === "add-set") addSet(entryId);
   if (action === "remove-set") removeSet(entryId, setId);
   if (action === "toggle-set") toggleSet(entryId, setId);
@@ -346,6 +525,7 @@ async function handleClick(event) {
 
 function handleInput(event) {
   const input = event.target;
+  if (input.dataset.field === "program-name" && state.programDraft) state.programDraft.name = input.value;
   if (input.dataset.field === "workout-note" && state.activeWorkout) {
     state.activeWorkout.note = input.value;
     persistActive();
@@ -382,11 +562,176 @@ function startWorkout() {
   render();
 }
 
-function openExerciseDialog() {
+function createProgramDraft() {
+  const now = new Date().toISOString();
+  state.programDraft = {
+    id: uid("program"),
+    name: "Моя программа",
+    days: [],
+    createdAt: now,
+    updatedAt: now,
+    isNew: true
+  };
+  state.route = "program-edit";
+  render();
+}
+
+function editProgram(programId) {
+  const program = state.programs.find((item) => item.id === programId);
+  if (!program) return;
+  state.programDraft = { ...structuredClone(program), isNew: false };
+  state.route = "program-edit";
+  render();
+}
+
+function toggleProgramDay(dayKey) {
+  if (!state.programDraft || !weekDays.some((day) => day.key === dayKey)) return;
+  const exists = state.programDraft.days.some((day) => day.key === dayKey);
+  state.programDraft.days = exists
+    ? state.programDraft.days.filter((day) => day.key !== dayKey)
+    : [...state.programDraft.days, { key: dayKey, exercises: [] }];
+  render();
+}
+
+function addExerciseToProgram(exerciseId, dayKey) {
+  const source = state.exercises.find((exercise) => exercise.id === exerciseId);
+  const day = state.programDraft?.days.find((item) => item.key === dayKey);
+  if (!source || !day) return;
+  if (day.exercises.some((exercise) => exercise.exerciseId === exerciseId)) {
+    exerciseDialog.close();
+    return showToast("Это упражнение уже есть в этом дне");
+  }
+  day.exercises.push({ id: uid("plan"), exerciseId: source.id, name: source.name, sets: 3 });
+  exerciseDialog.close();
+  render();
+  showToast("Упражнение добавлено в программу");
+}
+
+function adjustProgramSets(dayKey, planExerciseId, delta) {
+  const exercise = state.programDraft?.days.find((day) => day.key === dayKey)?.exercises.find((item) => item.id === planExerciseId);
+  if (!exercise) return;
+  exercise.sets = Math.min(12, Math.max(1, Number(exercise.sets) + delta));
+  render();
+}
+
+function removeProgramExercise(dayKey, planExerciseId) {
+  const day = state.programDraft?.days.find((item) => item.key === dayKey);
+  if (!day) return;
+  day.exercises = day.exercises.filter((exercise) => exercise.id !== planExerciseId);
+  render();
+}
+
+async function saveProgram() {
+  const draft = state.programDraft;
+  if (!draft) return;
+  const name = draft.name.trim();
+  if (!name) return showToast("Дай программе название");
+  if (!draft.days.length) return showToast("Выбери хотя бы один тренировочный день");
+  const emptyDay = draft.days.find((day) => !day.exercises.length);
+  if (emptyDay) {
+    const weekday = weekDays.find((day) => day.key === emptyDay.key);
+    return showToast(`Добавь упражнение: ${weekday.label}`);
+  }
+  const isFirstProgram = !state.programs.length;
+  const program = {
+    id: draft.id,
+    name,
+    days: sortedProgramDays(draft.days),
+    createdAt: draft.createdAt,
+    updatedAt: new Date().toISOString()
+  };
+  await put("programs", program);
+  if (isFirstProgram || !state.settings.activeProgramId) {
+    state.settings.activeProgramId = program.id;
+    saveSettings();
+  }
+  state.programDraft = null;
+  await refreshData();
+  state.route = "programs";
+  render();
+  showToast("Программа сохранена");
+}
+
+async function activateProgram(programId) {
+  if (!state.programs.some((program) => program.id === programId)) return;
+  state.settings.activeProgramId = programId;
+  saveSettings();
+  render();
+  showToast("Активная программа изменена");
+}
+
+async function deleteProgram(programId) {
+  const program = state.programs.find((item) => item.id === programId);
+  if (!program || !confirm(`Удалить программу «${program.name}»? Сохранённые тренировки останутся в истории.`)) return;
+  await remove("programs", programId);
+  if (state.settings.activeProgramId === programId) {
+    state.settings.activeProgramId = "";
+    saveSettings();
+  }
+  await refreshData();
+  render();
+  showToast("Программа удалена");
+}
+
+function startProgramWorkout(programId, dayKey) {
+  const program = state.programs.find((item) => item.id === programId);
+  const day = program?.days.find((item) => item.key === dayKey);
+  if (!program || !day) return;
+  if (state.activeWorkout) {
+    if (state.activeWorkout.programId === programId && state.activeWorkout.programDayKey === dayKey) {
+      state.route = "workout";
+      render();
+      return;
+    }
+    if (!confirm("Незавершённая тренировка будет заменена выбранным днём. Продолжить?")) return;
+  }
+  const previous = latestProgramDayWorkout(programId, dayKey);
+  const weekday = weekDays.find((item) => item.key === dayKey);
+  const now = new Date();
+  state.activeWorkout = {
+    id: uid("workout"),
+    date: now.toISOString(),
+    startedAt: now.toISOString(),
+    endedAt: null,
+    programId,
+    programDayKey: dayKey,
+    programName: program.name,
+    title: weekday.label,
+    exercises: day.exercises.map((planned) => {
+      const previousExercise = previous?.exercises.find((exercise) => exercise.exerciseId === planned.exerciseId);
+      const previousSets = previousExercise?.sets || [];
+      return {
+        id: uid("entry"),
+        exerciseId: planned.exerciseId,
+        name: planned.name,
+        previousSets,
+        sets: Array.from({ length: planned.sets }, (_, index) => {
+          const last = previousSets[index] || previousSets.at(-1);
+          return { id: uid("set"), weight: last?.weight ?? "", reps: last?.reps ?? "", done: false };
+        })
+      };
+    }),
+    note: ""
+  };
+  persistActive();
+  state.route = "workout";
+  render();
+}
+
+function openExerciseDialog(context = { type: "workout" }) {
+  state.exercisePickerContext = context;
   exerciseSearch.value = "";
   renderExercisePicker();
   exerciseDialog.showModal();
   window.setTimeout(() => exerciseSearch.focus(), 120);
+}
+
+function selectExerciseFromPicker(exerciseId) {
+  if (state.exercisePickerContext.type === "program") {
+    addExerciseToProgram(exerciseId, state.exercisePickerContext.dayKey);
+    return;
+  }
+  addExerciseToWorkout(exerciseId);
 }
 
 function renderExercisePicker(filter = "") {
@@ -462,7 +807,7 @@ function cancelWorkout() {
 
 async function finishWorkout() {
   if (!state.activeWorkout) return;
-  const validExercises = state.activeWorkout.exercises.map((exercise) => ({
+  const validExercises = state.activeWorkout.exercises.map(({ previousSets, ...exercise }) => ({
     ...exercise,
     sets: exercise.sets.filter((set) => Number(set.reps) > 0)
   })).filter((exercise) => exercise.sets.length);
@@ -518,8 +863,14 @@ async function createExercise(event) {
   await refreshData();
   event.currentTarget.reset();
   newExerciseDialog.close();
-  if (state.route === "workout") addExerciseToWorkout(exercise.id);
-  else { render(); showToast("Упражнение добавлено"); }
+  if (state.exercisePickerContext.type === "program" && state.programDraft) {
+    addExerciseToProgram(exercise.id, state.exercisePickerContext.dayKey);
+  } else if (state.route === "workout") {
+    addExerciseToWorkout(exercise.id);
+  } else {
+    render();
+    showToast("Упражнение добавлено");
+  }
 }
 
 function latestSetForExercise(exerciseId) {
@@ -530,13 +881,34 @@ function latestSetForExercise(exerciseId) {
   return null;
 }
 
+function getActiveProgram() {
+  return state.programs.find((program) => program.id === state.settings.activeProgramId) || null;
+}
+
+function latestProgramDayWorkout(programId, dayKey) {
+  return state.workouts.find((workout) => workout.programId === programId && workout.programDayKey === dayKey) || null;
+}
+
+function sortedProgramDays(days = []) {
+  return [...days].sort((a, b) => weekDays.findIndex((day) => day.key === a.key) - weekDays.findIndex((day) => day.key === b.key));
+}
+
+function todayKey() {
+  return weekDays.find((day) => day.jsDay === new Date().getDay())?.key || "mon";
+}
+
+function shortDate(value) {
+  return new Date(value).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+}
+
 async function exportBackup() {
   const backup = {
     app: "Железо",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     exercises: state.exercises,
     workouts: state.workouts,
+    programs: state.programs,
     settings: state.settings
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
@@ -559,8 +931,10 @@ async function importBackup(event) {
     if (!confirm(`Восстановить ${backup.workouts.length} тренировок? Текущие данные будут заменены.`)) return;
     await clear("exercises");
     await clear("workouts");
+    await clear("programs");
     await putMany("exercises", backup.exercises);
     await putMany("workouts", backup.workouts);
+    if (Array.isArray(backup.programs)) await putMany("programs", backup.programs);
     state.settings = { restSeconds: 90, ...(backup.settings || {}) };
     saveSettings();
     await refreshData();
@@ -573,9 +947,10 @@ async function importBackup(event) {
 }
 
 async function wipeData() {
-  if (!confirm("Точно удалить все тренировки и свои упражнения? Сначала сделай резервную копию.")) return;
+  if (!confirm("Точно удалить все тренировки, программы и свои упражнения? Сначала сделай резервную копию.")) return;
   if (!confirm("Последнее предупреждение: восстановить данные без копии будет невозможно.")) return;
   await clear("workouts");
+  await clear("programs");
   await clear("exercises");
   await putMany("exercises", seedExercises);
   localStorage.removeItem(ACTIVE_KEY);

@@ -1,4 +1,4 @@
-const CACHE_NAME = "zhelezo-v1";
+const CACHE_NAME = "zhelezo-v2";
 const APP_ASSETS = [
   "./",
   "./index.html",

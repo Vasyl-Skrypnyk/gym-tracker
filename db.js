@@ -1,5 +1,5 @@
 const DB_NAME = "zhelezo-workouts";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const seedExercises = [
   ["Жим штанги лёжа", "Грудь"],
@@ -65,6 +65,9 @@ export async function openDatabase() {
       if (!db.objectStoreNames.contains("workouts")) {
         const store = db.createObjectStore("workouts", { keyPath: "id" });
         store.createIndex("date", "date");
+      }
+      if (!db.objectStoreNames.contains("programs")) {
+        db.createObjectStore("programs", { keyPath: "id" });
       }
     };
 
